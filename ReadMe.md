@@ -65,3 +65,4 @@ The dataset consists of three folders: `train`, `validation`, and `test`. Each f
 - Experiment with other transfer learning models like ResNet or EfficientNet.  
 - Deploy the model as a web application for real-time emotion detection.  
 - Optimize the model for faster inference on edge devices.  
+- Update tests to use F1-score
