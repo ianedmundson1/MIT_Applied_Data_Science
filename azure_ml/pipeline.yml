@@ -1,0 +1,93 @@
+# Azure ML Pipeline Configuration
+$schema: https://azuremlschemas.azureedge.net/latest/pipelineJob.schema.json
+type: pipeline
+
+# Pipeline metadata
+display_name: emotion_classification_training_pipeline
+description: End-to-end training pipeline for facial emotion classification
+tags:
+  project: facial-emotion-detection
+  model_type: cnn_vgg16
+  framework: tensorflow
+
+# Default compute target
+settings:
+  default_compute: azureml:gpu-cluster
+  default_datastore: azureml:workspaceblobstore
+  continue_on_step_failure: false
+
+# Pipeline inputs
+inputs:
+  training_data:
+    type: uri_folder
+    description: "Path to training data folder"
+  model_name:
+    type: string
+    default: "emotion-classifier"
+    description: "Name for registered model"
+  max_epochs:
+    type: integer
+    default: 30
+    description: "Maximum training epochs"
+
+# Pipeline outputs
+outputs:
+  trained_model:
+    type: uri_folder
+    description: "Trained model artifacts"
+  training_metrics:
+    type: uri_file
+    description: "Training metrics and logs"
+
+# Pipeline jobs
+jobs:
+  data_preparation:
+    type: command
+    component: azureml:data_prep_component@latest
+    inputs:
+      raw_data: ${{parent.inputs.training_data}}
+    outputs:
+      processed_data: 
+        type: uri_folder
+    compute: azureml:cpu-cluster
+    command: >
+      python src/preprocessing.py 
+      --input_path ${{inputs.raw_data}} 
+      --output_path ${{outputs.processed_data}}
+    environment: azureml:tensorflow-gpu-env@latest
+    code: .
+
+  model_training:
+    type: command
+    inputs:
+      training_data: ${{parent.jobs.data_preparation.outputs.processed_data}}
+      model_name: ${{parent.inputs.model_name}}
+      max_epochs: ${{parent.inputs.max_epochs}}
+    outputs:
+      model_output: ${{parent.outputs.trained_model}}
+      metrics_output: ${{parent.outputs.training_metrics}}
+    compute: azureml:gpu-cluster
+    command: >
+      python src/training.py 
+      --data_path ${{inputs.training_data}} 
+      --output_dir ${{outputs.model_output}}
+      --config_file config/training_config.json
+    environment: azureml:tensorflow-gpu-env@latest
+    code: .
+    
+  model_evaluation:
+    type: command
+    inputs:
+      model_path: ${{parent.jobs.model_training.outputs.model_output}}
+      test_data: ${{parent.jobs.data_preparation.outputs.processed_data}}
+    outputs:
+      evaluation_results:
+        type: uri_file
+    compute: azureml:gpu-cluster
+    command: >
+      python src/evaluation.py 
+      --model_path ${{inputs.model_path}}
+      --test_data ${{inputs.test_data}}
+      --output_file ${{outputs.evaluation_results}}
+    environment: azureml:tensorflow-gpu-env@latest
+    code: .

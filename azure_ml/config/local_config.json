@@ -1,0 +1,15 @@
+{
+  "learning_rate": 0.001,
+  "batch_size": 32,
+  "max_epochs": 1,
+  "patience": 2,
+  "image_size": 48,
+  "num_classes": 4,
+  "emotions": ["happy", "sad", "surprise", "neutral"],
+  "max_trials": 1,
+  "factor": 2,
+  "seed": 42,
+  "experiment_name": "facial-emotion-detection-local",
+  "model_name": "emotion-classifier-local",
+  "local_development": true
+}

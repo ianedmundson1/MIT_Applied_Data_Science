@@ -98,3 +98,7 @@ Facial_emotion_images
 models
 my_dir
 tensorflow-gpu
+.venv*
+data*
+mlruns*
+local_output*
