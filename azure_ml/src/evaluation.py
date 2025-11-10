@@ -138,6 +138,7 @@ def create_evaluation_plots(
     plt.tight_layout()
     
     cm_path = output_dir / 'confusion_matrix.png'
+    mlflow.log_figure(plt.gcf(), 'confusion_matrix.png')
     plt.savefig(cm_path, dpi=300, bbox_inches='tight')
     plt.close()
     
@@ -164,6 +165,9 @@ def create_evaluation_plots(
     plt.tight_layout()
     
     metrics_path = output_dir / 'per_class_metrics.png'
+    
+    mlflow.log_figure(plt.gcf(), 'per_class_metrics.png')
+    
     plt.savefig(metrics_path, dpi=300, bbox_inches='tight')
     plt.close()
     

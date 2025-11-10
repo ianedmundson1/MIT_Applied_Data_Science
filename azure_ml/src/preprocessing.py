@@ -124,9 +124,10 @@ def apply_data_augmentation(dataset: tf.data.Dataset) -> tf.data.Dataset:
         # Random contrast adjustment
         image = tf.image.random_contrast(image, lower=0.9, upper=1.1)
         
-        # Ensure values are in [0, 1] range
-        image = tf.clip_by_value(image, 0.0, 1.0)
-        
+        image = tf.image.random_saturation(image, 0.8, 1.2)
+        # Ensure values are in [0, 255] range
+        image = tf.clip_by_value(image, 0.0, 255.0)
+
         return image, label
     
     return dataset.map(augment_fn, num_parallel_calls=tf.data.AUTOTUNE)

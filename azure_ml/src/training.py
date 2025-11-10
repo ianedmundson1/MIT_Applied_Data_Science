@@ -62,7 +62,7 @@ def create_callbacks(config: TrainingConfig, model_dir: Path) -> list:
     """Create training callbacks"""
     callbacks = [
         EarlyStopping(
-            monitor='val_accuracy',
+            monitor='val_loss',
             patience=config.patience,
             restore_best_weights=True,
             verbose=1

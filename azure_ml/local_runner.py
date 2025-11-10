@@ -27,7 +27,6 @@ class LocalAsset:
     def __post_init__(self):
         self.path = Path(self.path)
 
-
 class LocalMLflowTracker:
     """Local MLflow tracking context manager"""
     
@@ -40,10 +39,23 @@ class LocalMLflowTracker:
             import mlflow
             import mlflow.tensorflow
             
+            # End any active run before starting a new one
+            if mlflow.active_run():
+                logger.warning(f"Found active MLflow run: {mlflow.active_run().info.run_id}. Ending it before starting new run.")
+                mlflow.end_run()
+            
             # Set tracking URI to use local file store
             mlflow.set_tracking_uri("file:///home/ian/Desktop/github/MIT_Applied_Data_Science/azure_ml/mlruns")
             
-            # Enable autologging specifically for TensorFlow
+            # Set the experiment name
+            mlflow.set_experiment(self.experiment_name)
+
+            # Explicitly start a new run
+            run = mlflow.start_run()
+            self.run_id = run.info.run_id
+            logger.info(f"Started MLflow run: {self.run_id} for experiment: {self.experiment_name}")
+
+            # Enable autologging for TensorFlow
             mlflow.tensorflow.autolog(
                 every_n_iter=1,
                 log_models=True,
@@ -53,10 +65,7 @@ class LocalMLflowTracker:
                 silent=False
             )
             
-            mlflow.set_experiment(self.experiment_name)
-            run = mlflow.start_run()
-            self.run_id = run.info.run_id
-            logger.info(f"Started local MLflow run: {self.run_id} with TensorFlow autologging")
+            logger.info(f"MLflow autologging enabled for experiment: {self.experiment_name}")
         except ImportError:
             logger.warning("MLflow not available, skipping tracking")
         return self
@@ -64,12 +73,13 @@ class LocalMLflowTracker:
     def __exit__(self, exc_type, exc_val, exc_tb):
         try:
             import mlflow
-            mlflow.end_run()
-            if self.run_id:
-                logger.info(f"Ended MLflow run: {self.run_id}")
-        except ImportError:
-            pass
-
+            # Ensure the run is ended even if there's an exception
+            if mlflow.active_run():
+                mlflow.end_run()
+                if self.run_id:
+                    logger.info(f"Ended MLflow run: {self.run_id}")
+        except Exception as e:
+            logger.error(f"Failed to end MLflow run: {str(e)}")
 
 class LocalPipelineRunner:
     """
@@ -235,38 +245,114 @@ class LocalPipelineRunner:
         training_metrics = self.create_local_asset("training_metrics.json", "URI_FILE")
         model_summary = self.create_local_asset("model_summary.txt", "URI_FILE")
         
-        with LocalMLflowTracker("local-training"):
-            try:
-                # Import required modules
-                import tensorflow as tf
-                from tensorflow import keras
-                import mlflow
-                import mlflow.tensorflow
+        
+        try:
+            # Import required modules
+            import tensorflow as tf
+            from tensorflow import keras
+            import mlflow
+            import mlflow.tensorflow
+            
+            from config import TrainingConfig
+            from model import cnn_model_color_VGG16_model
+            from training import set_seed, log_system_info, create_callbacks
+            
+            # Set seed
+            set_seed(seed)
+            
+            # Setup configuration
+            config = TrainingConfig()
+            config.max_epochs = max_epochs
+            config.learning_rate = learning_rate
+            config.patience = patience
+            config.max_trials = max_trials
+            config.seed = seed
+            config.model_name = model_name
+            
+            if config_file_path and Path(config_file_path).exists():
+                with open(config_file_path, 'r') as f:
+                    config_dict = json.load(f)
+                    for key, value in config_dict.items():
+                        if hasattr(config, key):
+                            setattr(config, key, value)
+
+            max_epochs = config.max_epochs
+            learning_rate = config.learning_rate
+            patience = config.patience
+            max_trials = config.max_trials
+            seed = config.seed
+            model_name = config.model_name
+            
+            # Log parameters
+            
+            # Log system info
+            log_system_info()
+            
+            # Load datasets
+            train_path = training_data_asset.path / "train"
+            val_path = training_data_asset.path / "validation"
+            
+            train_ds = tf.data.Dataset.load(str(train_path))
+            val_ds = tf.data.Dataset.load(str(val_path))
+            
+            print("max trials:", max_trials)
+            # For local testing, use a simpler model if hyperparameter tuning is too slow
+            if max_trials == 0:
+                logger.info("Using simple model for local testing (no hyperparameter tuning)")
                 
-                from config import TrainingConfig
-                from model import cnn_model_color_VGG16_model
-                from training import set_seed, log_system_info, create_callbacks
+                # Create simple model
+                model = keras.Sequential([
+                    keras.layers.Input(shape=(48, 48, 3)),  # Define input shape here
+                    keras.layers.Rescaling(1./255),
+                    keras.layers.Conv2D(16, 3, padding='same', activation='relu'),
+                    keras.layers.MaxPooling2D(),
+                    keras.layers.Conv2D(32, 3, padding='same', activation='relu'),
+                    keras.layers.MaxPooling2D(),
+                    keras.layers.Conv2D(64, 3, padding='same', activation='relu'),
+                    keras.layers.MaxPooling2D(),
+                    keras.layers.Flatten(),
+                    keras.layers.Dense(128, activation='relu'),
+                    keras.layers.Dropout(0.5),
+                    keras.layers.Dense(4, activation='softmax')
+                ])
+                                
+                best_model = model
                 
-                # Set seed
-                set_seed(seed)
+            else:
+                # Use hyperparameter tuning
+                from keras_tuner import BayesianOptimization
                 
-                # Setup configuration
-                config = TrainingConfig()
-                config.max_epochs = max_epochs
-                config.learning_rate = learning_rate
-                config.patience = patience
-                config.max_trials = max_trials
-                config.seed = seed
-                config.model_name = model_name
+                hypermodel = cnn_model_color_VGG16_model()
                 
-                if config_file_path and Path(config_file_path).exists():
-                    with open(config_file_path, 'r') as f:
-                        config_dict = json.load(f)
-                        for key, value in config_dict.items():
-                            if hasattr(config, key):
-                                setattr(config, key, value)
+                tuner = BayesianOptimization(
+                    hypermodel,
+                    objective='val_accuracy',
+                    seed=seed,
+                    max_trials=max_trials,
+                    directory=str(trained_model.path / 'tuning'),
+                    project_name=f'{model_name}_local_tuning',
+                    overwrite=True,
+                )
                 
-                # Log parameters
+                # Search for best hyperparameters
+                tuner.search(
+                    train_ds,
+                    validation_data=val_ds,
+                    epochs=max_epochs,
+                    verbose=1,
+                    callbacks=create_callbacks(config, trained_model.path)
+                )
+                
+                best_model = tuner.get_best_models(num_models=1)[0]
+                
+                # Log best hyperparameters
+                # best_hps = tuner.get_best_hyperparameters(num_trials=1)[0]
+                # for param in best_hps.space:
+                #     param_value = best_hps.get(param.name)
+                #     mlflow.log_param(f"best_{param.name}", param_value)
+            
+            with LocalMLflowTracker("local-training"):
+                # Create callbacks
                 mlflow.log_params({
                     "max_epochs": max_epochs,
                     "learning_rate": learning_rate,
@@ -274,72 +360,8 @@ class LocalPipelineRunner:
                     "max_trials": max_trials,
                     "seed": seed,
                     "model_name": model_name
-                })
-                
-                # Log system info
-                log_system_info()
-                
-                # Load datasets
-                train_path = training_data_asset.path / "train"
-                val_path = training_data_asset.path / "validation"
-                
-                train_ds = tf.data.Dataset.load(str(train_path))
-                val_ds = tf.data.Dataset.load(str(val_path))
-                
-                # For local testing, use a simpler model if hyperparameter tuning is too slow
-                if max_trials <= 1:
-                    logger.info("Using simple model for local testing (no hyperparameter tuning)")
-                    
-                    # Create simple model
-                    model = keras.Sequential([
-                        keras.layers.Rescaling(1./255, input_shape=(48, 48, 3)),
-                        keras.layers.Conv2D(16, 3, padding='same', activation='relu'),
-                        keras.layers.MaxPooling2D(),
-                        keras.layers.Conv2D(32, 3, padding='same', activation='relu'),
-                        keras.layers.MaxPooling2D(),
-                        keras.layers.Conv2D(64, 3, padding='same', activation='relu'),
-                        keras.layers.MaxPooling2D(),
-                        keras.layers.Flatten(),
-                        keras.layers.Dense(128, activation='relu'),
-                        keras.layers.Dropout(0.5),
-                        keras.layers.Dense(4, activation='softmax')
-                    ])
-                    
-                    best_model = model
-                    
-                else:
-                    # Use hyperparameter tuning
-                    from keras_tuner import BayesianOptimization
-                    
-                    hypermodel = cnn_model_color_VGG16_model()
-                    
-                    tuner = BayesianOptimization(
-                        hypermodel,
-                        objective='val_accuracy',
-                        seed=seed,
-                        max_trials=max_trials,
-                        directory=str(trained_model.path / 'tuning'),
-                        project_name=f'{model_name}_local_tuning',
-                        overwrite=True
-                    )
-                    
-                    # Search for best hyperparameters
-                    tuner.search(
-                        train_ds,
-                        validation_data=val_ds,
-                        epochs=max_epochs,
-                        verbose=1
-                    )
-                    
-                    best_model = tuner.get_best_models(num_models=1)[0]
-                    
-                    # Log best hyperparameters
-                    best_hps = tuner.get_best_hyperparameters(num_trials=1)[0]
-                    for param in best_hps.space:
-                        param_value = best_hps.get(param.name)
-                        mlflow.log_param(f"best_{param.name}", param_value)
-                
-                # Create callbacks
+                    })
+            
                 callbacks = create_callbacks(config, trained_model.path)
                 
                 # Compile model
@@ -358,12 +380,6 @@ class LocalPipelineRunner:
                     verbose=1
                 )
                 
-                # Save model
-                model_path = trained_model.path / "final_model.keras"
-                best_model.save(str(model_path))
-                
-
-
                 
                                 # Create comprehensive input example and signature
                 try:
@@ -391,16 +407,25 @@ class LocalPipelineRunner:
                     serving_input_example = None
                     signature = None
                 
+                best_model.save(trained_model.path / "final_model.keras")
                 
+                mlflow.tensorflow.log_model(
+                        model=best_model,
+                        artifact_path="model",
+                        registered_model_name="emotion-classifier-local",
+                        code_paths=["src/model.py"],  # This is critical!
+                        signature=signature,
+                        input_example=serving_input_example
+                    )
                 
-                # Also log as Keras model for compatibility
-                mlflow.keras.log_model(
-                    model=best_model,
-                    artifact_path="model", 
-                    registered_model_name=f"{model_name}_keras",
-                    signature=signature,
-                    input_example=serving_input_example
-                )
+                # # Also log as Keras model for compatibility
+                # mlflow.keras.log_model(
+                #     model=best_model,
+                #     artifact_path="model", 
+                #     registered_model_name=f"{model_name}_keras",
+                #     signature=signature,
+                #     input_example=serving_input_example
+                # )
                 
                 
                 # Calculate metrics
@@ -419,14 +444,6 @@ class LocalPipelineRunner:
                     if isinstance(value, (int, float)):
                         mlflow.log_metric(metric_name, value)
                 
-                # Save metrics
-                with open(training_metrics.path, 'w') as f:
-                    json.dump(final_metrics, f, indent=2, default=str)
-                
-                # Save model summary
-                with open(model_summary.path, 'w') as f:
-                    best_model.summary(print_fn=lambda x: f.write(x + '\n'))
-                
                 logger.info(f"✅ Training completed. Final validation accuracy: {final_metrics['final_val_accuracy']:.4f}")
                 
                 return {
@@ -435,9 +452,9 @@ class LocalPipelineRunner:
                     "model_summary": model_summary
                 }
                 
-            except Exception as e:
-                logger.error(f"❌ Model training failed: {str(e)}")
-                raise
+        except Exception as e:
+            logger.error(f"❌ Model training failed: {str(e)}")
+            raise
     
     def run_model_evaluation_local(
         self,
@@ -479,6 +496,7 @@ class LocalPipelineRunner:
                             if hasattr(config, key):
                                 setattr(config, key, value)
                 
+                emotions = config.emotions
                 # Load model
                 model_path = trained_model_asset.path / "final_model.keras"
                 model = tf.keras.models.load_model(str(model_path))
