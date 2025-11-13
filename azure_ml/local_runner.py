@@ -1,6 +1,20 @@
 """
 Local Pipeline Runner - Execute Azure ML components locally for development and testing
 """
+
+import os
+import sys
+
+# ✅ Suppress TensorFlow logging BEFORE importing TensorFlow
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress TF C++ logs
+# os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  # Disable oneDNN custom operations
+# os.environ['CUDA_VISIBLE_DEVICES'] = ''  # Optional: Disable GPU if not needed
+
+# Suppress TensorFlow warnings
+import warnings
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+warnings.filterwarnings('ignore', category=FutureWarning)
+
 import os
 import sys
 import json
@@ -14,6 +28,10 @@ from datetime import datetime
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
+# ✅ Set TensorFlow logging after import (belt and suspenders approach)
+import tensorflow as tf
+tf.get_logger().setLevel('ERROR')
+tf.autograph.set_verbosity(0)
 logger = logging.getLogger(__name__)
 
 
@@ -252,11 +270,11 @@ class LocalPipelineRunner:
             from tensorflow import keras
             import mlflow
             import mlflow.tensorflow
-            
+            from sklearn.utils.class_weight import compute_class_weight
             from config import TrainingConfig
-            from model import cnn_model_color_VGG16_model
+            from model import cnn_model_color_VGG16_model, EmotionClassifierWrapper
             from training import set_seed, log_system_info, create_callbacks
-            
+            import numpy as np
             # Set seed
             set_seed(seed)
             
@@ -295,6 +313,32 @@ class LocalPipelineRunner:
             train_ds = tf.data.Dataset.load(str(train_path))
             val_ds = tf.data.Dataset.load(str(val_path))
             
+            # Compute class weights from training data
+            logger.info("Computing class weights for imbalanced dataset...")
+            
+            # Extract all labels from the training dataset
+            y_train = []
+            for _, labels in train_ds:
+                y_train.append(labels.numpy())
+            
+            y_train = np.concatenate(y_train, axis=0)
+            y_train_labels = np.argmax(y_train, axis=1)  # Convert one-hot to class indices
+            
+            # Compute balanced class weights
+            class_weights = compute_class_weight(
+                class_weight='balanced',
+                classes=np.unique(y_train_labels),
+                y=y_train_labels
+            )
+            
+            class_weight_dict = {i: weight for i, weight in enumerate(class_weights)}
+            
+            logger.info(f"Class weights computed: {class_weight_dict}")
+        
+            # # Log class weights to MLflow
+            # for class_idx, weight in class_weight_dict.items():
+            #     mlflow.log_param(f"class_weight_{class_idx}", weight)
+                
             print("max trials:", max_trials)
             # For local testing, use a simpler model if hyperparameter tuning is too slow
             if max_trials == 0:
@@ -333,18 +377,36 @@ class LocalPipelineRunner:
                     project_name=f'{model_name}_local_tuning',
                     overwrite=True,
                 )
-                
+
                 # Search for best hyperparameters
                 tuner.search(
                     train_ds,
                     validation_data=val_ds,
                     epochs=max_epochs,
                     verbose=1,
-                    callbacks=create_callbacks(config, trained_model.path)
+                    callbacks=create_callbacks(config, trained_model.path),
+                    class_weight=class_weight_dict
                 )
                 
                 best_model = tuner.get_best_models(num_models=1)[0]
                 
+                # ✅ Get training history from tuning results
+                best_trial = tuner.oracle.get_best_trials(num_trials=1)[0]
+                
+                # Create a mock history object with the best trial's metrics
+                class MockHistory:
+                    def __init__(self, trial):
+                        self.history = {
+                            'accuracy': [trial.metrics.get_history('accuracy')[-1]] if trial.metrics.exists('accuracy') else [0],
+                            'val_accuracy': [trial.score if trial.score else 0],
+                            'loss': [trial.metrics.get_history('loss')[-1]] if trial.metrics.exists('loss') else [0],
+                            'val_loss': [trial.metrics.get_history('val_loss')[-1]] if trial.metrics.exists('val_loss') else [0]
+                        }
+                
+                history = MockHistory(best_trial)
+                
+                # Log best hyperparameters
+                best_hps = tuner.get_best_hyperparameters(num_trials=1)[0]
                 # Log best hyperparameters
                 # best_hps = tuner.get_best_hyperparameters(num_trials=1)[0]
                 # for param in best_hps.space:
@@ -361,62 +423,52 @@ class LocalPipelineRunner:
                     "seed": seed,
                     "model_name": model_name
                     })
+                
+                
+                # Log class weights
+                for class_idx, weight in class_weight_dict.items():
+                    mlflow.log_param(f"class_weight_{class_idx}", weight)
             
-                callbacks = create_callbacks(config, trained_model.path)
+                    # After training, save the base model
+                model_save_path = trained_model.path / "final_model.keras"
+                best_model.save(model_save_path)
                 
-                # Compile model
-                best_model.compile(
-                    optimizer=keras.optimizers.Adam(learning_rate=learning_rate),
-                    loss='categorical_crossentropy',
-                    metrics=['accuracy', 'precision', 'recall']
-                )
+                # Get emotions list from config
+                emotions = getattr(config, 'emotions', ['happy', 'sad', 'surprise', 'neutral'])
                 
-                # Train model
-                history = best_model.fit(
-                    train_ds,
-                    validation_data=val_ds,
-                    epochs=max_epochs,
-                    callbacks=callbacks,
-                    verbose=1
-                )
-                
-                
-                                # Create comprehensive input example and signature
+                # Create input example for signature
                 try:
-                    from mlflow.models.signature import infer_signature
-                    import numpy as np
-                    
-                    # Get a batch from the training dataset for input example
+                    # Get a sample batch
                     for batch_images, batch_labels in train_ds.take(1):
-                        # Take first few images as input example
-                        input_example = batch_images[:3].numpy()  # 3 samples for better inference
-                        
-                        # Get model predictions for signature inference
-                        predictions = best_model.predict(input_example, verbose=0)
-                        
-                        # Infer signature from input and output
-                        signature = infer_signature(input_example, predictions)
-                        
-                        # Use only first image for serving example (reduces artifact size)
-                        serving_input_example = input_example[:1]
+                        input_example = batch_images[:1].numpy()
                         break
-                        
+                    
+                    # ✅ Fix: Infer signature automatically
+                    from mlflow.models.signature import infer_signature
+                    sample_prediction = best_model.predict(input_example, verbose=0)
+                    signature = infer_signature(input_example, sample_prediction)
+                    
                 except Exception as e:
-                    logger.warning(f"Could not create input example and signature: {e}")
+                    logger.warning(f"Could not create signature: {e}")
                     input_example = None
-                    serving_input_example = None
                     signature = None
                 
-                best_model.save(trained_model.path / "final_model.keras")
+                # Log model with custom wrapper
+                mlflow.pyfunc.log_model(
+                    artifact_path="model",
+                    python_model=EmotionClassifierWrapper(emotions=emotions),
+                    artifacts={
+                        "model": str(model_save_path),
+                        #"code_path": str(Path(__file__).parent / "src")
+                    },
+                    code_paths=[str(Path(__file__).parent / "src" / "model.py")],
+                    registered_model_name=model_name,
+                    signature=signature,
+                    input_example=input_example
+                )
                 
-                mlflow.tensorflow.log_model(
-                        model=best_model,
-                        artifact_path="model",
-                        registered_model_name="emotion-classifier-local",
-                        code_paths=["src/model.py"],  # This is critical!
-                        signature=signature,
-                        input_example=serving_input_example
-                    )
+                logger.info(f"✅ Model logged with custom wrapper to MLflow registry: {model_name}")
+                
                 
                 # # Also log as Keras model for compatibility
                 # mlflow.keras.log_model(

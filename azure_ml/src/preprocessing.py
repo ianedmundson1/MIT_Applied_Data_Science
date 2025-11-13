@@ -115,8 +115,8 @@ def apply_data_augmentation(dataset: tf.data.Dataset) -> tf.data.Dataset:
         # Random horizontal flip
         image = tf.image.random_flip_left_right(image)
         
-        # Random rotation (up to 20 degrees)
-        image = tf.image.rot90(image, k=tf.random.uniform([], 0, 4, dtype=tf.int32))
+        # # Random rotation (up to 20 degrees)
+        # image = tf.image.rot90(image, k=tf.random.uniform([], 0, 4, dtype=tf.int32))
         
         # Random brightness adjustment
         image = tf.image.random_brightness(image, max_delta=0.1)
