@@ -146,7 +146,7 @@ def run_azure_pipeline(args):
         from azure.ai.ml.constants import AssetTypes
         from azure.identity import DefaultAzureCredential
         from src.config import AzureMLConfig
-        
+
         # Initialize Azure ML client
         azure_config = AzureMLConfig()
         credential = DefaultAzureCredential()

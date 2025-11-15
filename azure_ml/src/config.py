@@ -49,9 +49,9 @@ class AzureMLConfig:
     
     def __post_init__(self):
         # Try to get from environment variables
-        self.subscription_id = self.subscription_id or os.getenv('AZURE_SUBSCRIPTION_ID')
-        self.resource_group = self.resource_group or os.getenv('AZURE_RESOURCE_GROUP')
-        self.workspace_name = self.workspace_name or os.getenv('AZURE_ML_WORKSPACE_NAME')
+        self.subscription_id = os.getenv('AZURE_SUBSCRIPTION_ID')
+        self.resource_group = os.getenv('AZURE_RESOURCE_GROUP')
+        self.workspace_name = os.getenv('AZURE_ML_WORKSPACE_NAME')
 
 
 def get_ml_client(config: AzureMLConfig) -> MLClient:

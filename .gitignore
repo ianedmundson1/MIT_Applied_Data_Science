@@ -102,3 +102,4 @@ tensorflow-gpu
 data*
 mlruns*
 local_output*
+notes_azure*
